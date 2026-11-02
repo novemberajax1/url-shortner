@@ -2,7 +2,9 @@ import express from "express";
 import crypto from "node:crypto";
 import db from "./db.js"; //relative path, look one dir up
 import morgan from "morgan";
-
+import session from "express-session";
+import argon2 from "argon2";
+//consider using express validtor middleware
 const app = express();
 //parse it to JSON before routing
 //These are ezecuted before the eoutes, it executes a requests is sent
@@ -11,19 +13,45 @@ app.use(morgan("dev")); //apply to all respones
 //connecting to one of the databases in the postgres DBMS
 // POST for convert the original url to short urls
 
-function isValidurl(url) {
-  if (typeof url !== "string") {
-    return false;
-  }
+//handle sessions, create session, set sessio cookie, set config
+//Owns and Manages rhe session identifier
+//store session in memory
+app.use(
+  session({
+    name: "sessionID", //the name of the session
+    secret: "secret key", //signs the session ID cookie , key, protect the session
+    resave: false, //avoid saving an unchanged session
+    saveUninitialized: true, //avoid ssaving a newly created session that has not been modified, created when saved
+    //configure a cookie
+    cookie: {
+      httpOnly: false, //avoid browser JS to accessing the cookie
+      secure: false,
+    },
+  }),
+);
 
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
+function requireAuth(req, res, next) {
+  //if exist
+  if (req.session.userID) {
+    return next();
   }
+  return res.status(401).send({ message: "Unauthorised" });
 }
 
+//valid URL
+function isValidurl(url) {
+  return URL.canParse(url);
+}
+
+//valid userInfo
+function isValidCredentials(userInfo) {
+  if (typeof userInfo !== "string") {
+    return false;
+  }
+  return true;
+}
+
+//the cryptographic generator does not provide enough entropyu
 function shortcode(length = 6) {
   //define a set of chars
   const chars =
@@ -45,14 +73,158 @@ function shortcode(length = 6) {
   return result;
 }
 
-//just maybe add authentication but consider poprerly
-//think about using express.Router to group routes but ther are only a fee routes so
+//authoization and authentication
+//signup endpoint
+//user creation
+app.post("shorten/register", async (req, res) => {
+  //get the req body username and password
+  const { email, password } = req.body;
+
+  //check empty
+  if (!email || !password) {
+    return res.status(400).send({
+      error: "Empty input",
+    });
+  }
+
+  //check valid
+  if (
+    isValidCredentials(email) === false ||
+    isValidCredentials(password) === false
+  ) {
+    return res.status(400).send({
+      error: "Bad input",
+    });
+  }
+
+  //hash password
+  const password_hash = await argon2.hash(password, { hashLength: 60 });
+
+  //store the new user in the db including the hash
+
+  const user = {
+    u_email: email,
+    password_hash: password_hash,
+  };
+
+  //insert into db
+  const result = await db.one(
+    "INSERT INTO users (email,password_hash) VALUES($1,$2) RETURNING id",
+    [user.u_email, user.password_hash],
+  );
+
+  //express regenerates the session, create a fresh random sessionID
+  //session ID identifies the particular session
+  req.session.regenerate((err) => {
+    if (err) return next(err);
+
+    //express saves the modified session data in the server side session store, session created
+    //this is the session data being stored on the server
+    req.session.userID = result.id;
+
+    //save the session
+    req.session.save((err) => {
+      if (err) return next(err);
+
+      return res.status(201).send({
+        message: "Registration successful",
+      });
+    });
+  });
+
+  //browser receives a cookie containing the sessin ID (sid)from the server, not the session data (==> req.session.userID)
+
+  //on subsequent requests, express use the session cookie to retrieve the session data, recognize the authenticated user
+});
+
+app.post("/shorten/login", async (req, res) => {
+  const { email, password } = req.body;
+
+  //check empty
+  if (!email || !password) {
+    return res.status(400).send({
+      error: "Empty input",
+    });
+  }
+
+  //check valid
+  if (
+    isValidCredentials(email) === false ||
+    isValidCredentials(password) === false
+  ) {
+    return res.status(400).send({
+      error: "Bad input",
+    });
+  }
+  //find hash associated with email
+  const result = db.oneOrNone(
+    "SELECT id, password_hash FROM users WHERE email = $1",
+    email,
+  );
+  //user might not exists
+  if (result === null) {
+    return res.status(404).send({
+      error: "User not found",
+    });
+  }
+
+  //compare the hash with the password string
+  const verified = await argon2.verify(result.password_hash, password);
+
+  //unauthorized, 401 user identity cannot be verified
+  if (!verified) {
+    return res.status(401).send({
+      error: "Invalid e-mail or password",
+    });
+  }
+
+  //regenerate the session guard against session fixation
+  //the new sessio object will be generated
+  req.session.regenerate((err) => {
+    if (err) return next(err); // handle to custoe error handler if error
+
+    //assoicate the session with the authenticated user,
+    req.session.userID = result.id;
+
+    //save the session, persis the authenticated session
+    req.session.save((err) => {
+      if (err) return next(err);
+
+      //send success login status
+      return res.status(200).send({
+        message: "Login successful",
+      });
+    });
+  });
+});
+
+// logging out
+//doing an action
+//Terminate the current authenticated session
+app.post("shorten/logout", (req, res) => {
+  //destroy the session associated with the request session cookie on the server
+  req.session.destroy((err) => {
+    if (err) return next(err); //next handling middleware
+
+    //clear cookies, clear the session id cookie on browser
+    res.clearCookie("connect.sid");
+
+    return res.sendStatus(204);
+  });
+});
 
 //Create a short URL
-app.post("/shorten", async (req, res) => {
+// custome alias and expiration data is optional things that you can send through the post request
+//allow multiple different short code for the same long URL
+//WRITE api
+//need auth
+app.post("/shorten", requireAuth(), async (req, res) => {
+  if (req.session.userID) {
+  }
+
   const originUrl = req.body?.url;
 
-  //check if the url is a string, proceed
+  //check valid url
   if (!isValidurl(originUrl)) {
     return res.status(400).send({
       error: "Invalid URL",
@@ -64,6 +236,8 @@ app.post("/shorten", async (req, res) => {
 
   //get date
   const date = new Date(Date.now());
+
+  //set expiration date
 
   //result object
   //the id is not inserted into the database
@@ -104,9 +278,8 @@ app.post("/shorten", async (req, res) => {
   });
 });
 
-//get original through returned shortcode from POST
-//saearch db, search origina link associated with code
-//redirection
+//takes in the shortcode and redirect the user to the original long URL
+//READ
 app.get("/shorten/:shortcode", async (req, res) => {
   //extract the url params, default string
   const shortUrl = req.params.shortcode;
@@ -129,16 +302,18 @@ app.get("/shorten/:shortcode", async (req, res) => {
       error: "Short URL not found",
     });
   }
-  //add a column to the table and update everytimee while doing get requests
+
+  //302 redirect, browsers do not cache this response
+  //Every request will go through this server
+  //tracking click stat is optional
 
   return res.redirect(result.originurl);
   //either staight up redirect or. return the url and redirect
 });
 
-//need to update timestamp too
-//going to update the new put URL that's the only responsibililty based on the short code
-//not use etag to check if both links , etag is used for cache validation
-//further, a user supplied URL might be malicious , redirecting to other malicious servicces
+//update the url if new url appears
+//but this is more like creating a new resource
+
 app.put("/shorten/:shortcode", async (req, res) => {
   //the body will include a updated url
   const newUrl = req.body?.url;
@@ -222,9 +397,8 @@ app.get("/shorten/:shortcode/stats", async (req, res) => {
   });
 });
 
-//client only see a controlled JSON response
 //last middleware in the request handling process
-//if not handled here, then handled with default handler which there will be a stack trace
+//if not handled here, then handled with default handler
 //catch all
 //the error handler forces
 app.use((err, req, res, next) => {
@@ -241,7 +415,7 @@ app.use((err, req, res, next) => {
   }
 
   //unexcpected
-  console.error(err);
+  console.error(err); //showing at the error level
   return res.status(500).send({
     error: "Internal server error",
   });
