@@ -1,6 +1,5 @@
 //auth middleware to protect paths
 function requireAuth(req, res, next) {
-  console.log("Cookie present:", Boolean(req.headers.cookie));
   console.log("Session ID:", req.sessionID);
   console.log("Session userId:", req.session?.userID);
   //if exist in the session object
