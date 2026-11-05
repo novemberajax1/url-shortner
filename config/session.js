@@ -25,7 +25,7 @@ const sessionMiddleware = session({
   //configure a cookie
   cookie: {
     httpOnly: true, //ensure javascript cannot read the id
-    secure: false,
+    secure: false,//if true only allows https 
     sameSite: "lax",
     maxAge: 600000, //expires in 10 minutes, after that the sessio is invalid, new session and new session ID
   },
